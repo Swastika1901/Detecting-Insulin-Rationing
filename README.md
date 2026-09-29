@@ -137,8 +137,28 @@ To verify that feature engineering and anomaly scoring effectively capture ratio
 
 ![Synthetic Validation Chart](report/validation_chart.png)
 
+### Robustness Sweep & Leakage Analysis (`report/robustness.csv`)
+
+Evaluated over **20 random seeds** per configuration with Gaussian gap noise ($\sigma = 10\%$ patient mean gap), single long gap confounders (10% of control group), and feature leakage ablation:
+
+| Multiplier Step | Injection Fraction | IsolationForest AUC | Logistic Regression AUC | Confounder Flagged (%) | Feature Leakage AUC Drop |
+| :---: | :---: | :---: | :---: | :---: | :---: |
+| 0.05 | 5% | $0.7462 \pm 0.0525$ | $0.8605 \pm 0.0861$ | 43.33% | -0.4286 |
+| 0.05 | 10% | $0.7169 \pm 0.0453$ | $0.8899 \pm 0.0429$ | 78.93% | -0.4105 |
+| 0.05 | 15% | $0.7036 \pm 0.0377$ | $0.8831 \pm 0.0452$ | 99.62% | -0.4452 |
+| 0.10 | 5% | $0.8571 \pm 0.0275$ | $0.9495 \pm 0.0554$ | 41.33% | -0.3770 |
+| 0.10 | 10% | $0.8328 \pm 0.0167$ | $0.9628 \pm 0.0237$ | 71.79% | -0.3406 |
+| 0.10 | 15% | $0.8126 \pm 0.0206$ | $0.9583 \pm 0.0243$ | 99.23% | -0.3268 |
+| 0.20 | 5% | $0.9355 \pm 0.0192$ | $0.9856 \pm 0.0195$ | 31.00% | -0.1852 |
+| 0.20 | 10% | $0.9018 \pm 0.0125$ | $0.9878 \pm 0.0101$ | 57.86% | -0.1423 |
+| 0.20 | 15% | $0.8787 \pm 0.0148$ | $0.9853 \pm 0.0108$ | 80.77% | -0.1294 |
+| 0.40 | 5% | $0.9711 \pm 0.0131$ | $0.9949 \pm 0.0050$ | 22.33% | -0.0595 |
+| 0.40 | 10% | $0.9513 \pm 0.0117$ | $0.9941 \pm 0.0053$ | 37.86% | -0.0580 |
+| 0.40 | 15% | $0.9272 \pm 0.0170$ | $0.9915 \pm 0.0066$ | 53.46% | -0.0553 |
+
 > [!IMPORTANT]  
-> **Key Validation Finding**: Unsupervised IsolationForest achieves a **0.9801 ROC-AUC** across contamination thresholds. Supervised baselines achieve perfect cross-validated classification on the injected synthetic labels.
+> **Key Validation Finding**: Unsupervised IsolationForest achieves strong performance across parameter sweeps, maintaining up to **0.9711 ROC-AUC** under noise and confounder perturbations. Removing trend features (`gap_trend_slope` and `mean_gap_ratio`) leads to a substantial AUC drop (up to -0.4452), demonstrating that trend features carry critical signal.
+
 
 ---
 

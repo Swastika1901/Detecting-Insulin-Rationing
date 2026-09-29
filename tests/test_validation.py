@@ -72,3 +72,52 @@ def test_missing_columns_raises_keyerror():
 
     with pytest.raises(KeyError, match="must contain 'DESYNPUF_ID' and 'SRVC_DT'"):
         inject_synthetic_rationing(df)
+
+
+def test_robustness_csv_produced_and_auc_in_range():
+    """Verify report/robustness.csv is produced and all AUC values lie in [0, 1]."""
+    csv_path = Path(__file__).resolve().parent.parent / "report" / "robustness.csv"
+    assert csv_path.exists(), f"Expected robustness CSV at {csv_path}"
+
+    df = pd.read_csv(csv_path)
+    assert not df.empty, "report/robustness.csv is empty"
+
+    required_cols = [
+        "multiplier_step",
+        "injection_fraction",
+        "iforest_auc_mean",
+        "iforest_auc_std",
+        "logreg_auc_mean",
+        "logreg_auc_std",
+        "confounder_flagged_pct",
+        "leakage_auc_drop",
+    ]
+    for col in required_cols:
+        assert col in df.columns, f"Missing column {col} in robustness.csv"
+
+    # Check AUC values are in [0, 1]
+    for _, row in df.iterrows():
+        assert 0.0 <= row["iforest_auc_mean"] <= 1.0, f"Invalid iforest_auc_mean: {row['iforest_auc_mean']}"
+        assert 0.0 <= row["logreg_auc_mean"] <= 1.0, f"Invalid logreg_auc_mean: {row['logreg_auc_mean']}"
+        assert row["iforest_auc_std"] >= 0.0
+        assert row["logreg_auc_std"] >= 0.0
+        assert 0.0 <= row["confounder_flagged_pct"] <= 100.0
+
+
+def test_run_robustness_experiment_fast():
+    """Fast execution test of run_robustness_experiment producing valid AUCs."""
+    from scripts.run_validation import run_robustness_experiment
+
+    res_df = run_robustness_experiment(
+        multiplier_steps=[0.20],
+        injection_fractions=[0.10],
+        n_seeds=2,
+        n_patients=60,
+    )
+
+    assert not res_df.empty
+    assert len(res_df) == 1
+    row = res_df.iloc[0]
+    assert 0.0 <= row["iforest_auc_mean"] <= 1.0
+    assert 0.0 <= row["logreg_auc_mean"] <= 1.0
+

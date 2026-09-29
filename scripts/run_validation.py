@@ -1,19 +1,10 @@
 """
 scripts/run_validation.py
 ==========================
-Runs the synthetic rationing validation experiment to empirically verify that
-our feature engineering and IsolationForest model detect rationing behavior,
-and compares performance against supervised baseline classifiers.
-
-Pipeline Steps:
-1. Load cohort data (or generate synthetic cohort if data/raw/ is empty/sparse).
-2. Inject synthetic rationing into ~15% of patients using `inject_synthetic_rationing`.
-3. Extract patient-level features on perturbed cohort data.
-4. Evaluate IsolationForest anomaly model at contamination levels 5%, 10%, and 20%.
-5. Evaluate supervised baselines (Logistic Regression, Random Forest, Decision Tree)
-   using Stratified 5-Fold Cross Validation on the same injected labels.
-6. Save all metrics (ROC-AUC, Precision, Recall) to `report/metrics.csv`.
-7. Generate validation visualization chart `report/validation_chart.png`.
+Runs synthetic rationing validation & robustness experiments:
+1. Benchmark IsolationForest vs Supervised Classifiers (metrics.csv).
+2. Robustness sweep over multiplier_step, injection_fraction, Gaussian noise,
+   confounder hospitalizations, and leakage checks across 20 random seeds (robustness.csv).
 """
 
 from __future__ import annotations
@@ -26,11 +17,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.tree import DecisionTreeClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import precision_score, recall_score, roc_auc_score
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
+from sklearn.tree import DecisionTreeClassifier
 
 # Add project root to sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -40,7 +31,11 @@ from src.data_loader import load_cohort  # noqa: E402
 from src.feature_engineering import build_patient_features  # noqa: E402
 from src.model import FEATURE_COLS, score_patients, train_anomaly_model  # noqa: E402
 from src.synthetic import generate_synthetic_cohort  # noqa: E402
-from src.validation import inject_synthetic_rationing  # noqa: E402
+from src.validation import (  # noqa: E402
+    apply_confounder_gaps,
+    apply_gap_noise,
+    inject_synthetic_rationing,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -97,6 +92,129 @@ def evaluate_supervised_baselines(
         )
 
     return results
+
+
+def run_robustness_experiment(
+    multiplier_steps: list[float] = [0.05, 0.10, 0.20, 0.40],
+    injection_fractions: list[float] = [0.05, 0.10, 0.15],
+    n_seeds: int = 20,
+    n_patients: int = 150,
+) -> pd.DataFrame:
+    """Run robustness sweep experiment over multiplier_step, injection_fraction, and 20 random seeds."""
+    logger.info(
+        "Starting robustness experiment sweep (%d configs x %d seeds)...",
+        len(multiplier_steps) * len(injection_fractions),
+        n_seeds,
+    )
+
+    rows = []
+
+    for mult_step in multiplier_steps:
+        for inj_frac in injection_fractions:
+            iforest_aucs = []
+            logreg_aucs = []
+            conf_flagged_pcts = []
+            auc_drops = []
+
+            for seed_idx in range(n_seeds):
+                seed = 42 + seed_idx
+                df_base = generate_synthetic_cohort(n_patients=n_patients, random_state=seed)
+
+                # 1. Synthetic rationing injection
+                df_inj, inj_pids = inject_synthetic_rationing(
+                    df_base, fraction=inj_frac, random_state=seed, multiplier_step=mult_step
+                )
+
+                # 2. Confounder group (single long gap for 10% of control patients)
+                df_conf, conf_pids = apply_confounder_gaps(
+                    df_inj, injected_pids=inj_pids, fraction=0.10, random_state=seed
+                )
+
+                # 3. Add Gaussian noise (sigma = 10% of patient mean gap)
+                df_noisy = apply_gap_noise(df_conf, noise_ratio=0.10, random_state=seed)
+
+                # 4. Extract features
+                feats_df = build_patient_features(df_noisy, min_fills=4)
+
+                if feats_df.empty or feats_df["DESYNPUF_ID"].nunique() < 5:
+                    continue
+
+                feats_df["is_rationer"] = feats_df["DESYNPUF_ID"].isin(inj_pids)
+                feats_df["is_confounder"] = feats_df["DESYNPUF_ID"].isin(conf_pids)
+                y = feats_df["is_rationer"].astype(int)
+
+                if y.nunique() < 2:
+                    continue
+
+                # 5. Isolation Forest
+                model_if, scaler_if = train_anomaly_model(
+                    feats_df, contamination=inj_frac, save_dir=None, random_state=seed
+                )
+                scored_if = score_patients(model_if, scaler_if, feats_df)
+
+                auc_if = roc_auc_score(y, scored_if["anomaly_score"])
+                iforest_aucs.append(auc_if)
+
+                # Confounder false positive check
+                conf_df = scored_if[scored_if["is_confounder"]]
+                if not conf_df.empty:
+                    pct = float(conf_df["flagged"].sum() / len(conf_df) * 100.0)
+                    conf_flagged_pcts.append(pct)
+
+                # 6. Logistic Regression Full vs Reduced (Leakage Check)
+                X_full = feats_df[FEATURE_COLS].values
+                X_red = feats_df[["pay_amt_trend", "std_gap_ratio"]].values
+
+                skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
+                auc_full_folds = []
+                auc_red_folds = []
+
+                for train_idx, val_idx in skf.split(X_full, y):
+                    y_tr, y_va = y.iloc[train_idx], y.iloc[val_idx]
+                    if y_tr.nunique() < 2 or y_va.nunique() < 2:
+                        continue
+
+                    # Full model
+                    s_f = StandardScaler()
+                    X_tr_f = s_f.fit_transform(X_full[train_idx])
+                    X_va_f = s_f.transform(X_full[val_idx])
+
+                    clf_f = LogisticRegression(random_state=seed)
+                    clf_f.fit(X_tr_f, y_tr)
+                    p_f = clf_f.predict_proba(X_va_f)[:, 1]
+                    auc_full_folds.append(roc_auc_score(y_va, p_f))
+
+                    # Reduced model (leakage check)
+                    s_r = StandardScaler()
+                    X_tr_r = s_r.fit_transform(X_red[train_idx])
+                    X_va_r = s_r.transform(X_red[val_idx])
+
+                    clf_r = LogisticRegression(random_state=seed)
+                    clf_r.fit(X_tr_r, y_tr)
+                    p_r = clf_r.predict_proba(X_va_r)[:, 1]
+                    auc_red_folds.append(roc_auc_score(y_va, p_r))
+
+                if auc_full_folds and auc_red_folds:
+                    mean_full = np.mean(auc_full_folds)
+                    mean_red = np.mean(auc_red_folds)
+                    logreg_aucs.append(mean_full)
+                    auc_drops.append(mean_full - mean_red)
+
+            rows.append(
+                {
+                    "multiplier_step": mult_step,
+                    "injection_fraction": inj_frac,
+                    "iforest_auc_mean": round(float(np.mean(iforest_aucs)), 4),
+                    "iforest_auc_std": round(float(np.std(iforest_aucs)), 4),
+                    "logreg_auc_mean": round(float(np.mean(logreg_aucs)), 4),
+                    "logreg_auc_std": round(float(np.std(logreg_aucs)), 4),
+                    "confounder_flagged_pct": round(float(np.mean(conf_flagged_pcts)), 2) if conf_flagged_pcts else 0.0,
+                    "leakage_auc_drop": round(float(np.mean(auc_drops)), 4) if auc_drops else 0.0,
+                }
+            )
+
+    robustness_df = pd.DataFrame(rows)
+    return robustness_df
 
 
 def main():
@@ -200,7 +318,19 @@ def main():
     print(metrics_df.to_string(index=False))
     print("=" * 70 + "\n")
 
-    # 7. Detailed breakdown for default 10% IsolationForest
+    # 7. Robustness Experiment Sweep (20 Seeds x 12 Configs)
+    robustness_df = run_robustness_experiment()
+    robustness_csv_path = report_dir / "robustness.csv"
+    robustness_df.to_csv(robustness_csv_path, index=False)
+    logger.info("Saved robustness experiment results to %s", robustness_csv_path)
+
+    print("-" * 70)
+    print("                    ROBUSTNESS EXPERIMENT RESULTS")
+    print("-" * 70)
+    print(robustness_df.to_string(index=False))
+    print("-" * 70 + "\n")
+
+    # 8. Detailed breakdown for default 10% IsolationForest
     rationers_df = scored_df_10[scored_df_10["is_synthetic_rationer"]]
     rest_df = scored_df_10[~scored_df_10["is_synthetic_rationer"]]
 
@@ -215,22 +345,7 @@ def main():
     mean_risk_rationers = float(rationers_df["risk_score"].mean()) if total_rationers > 0 else 0.0
     mean_risk_rest = float(rest_df["risk_score"].mean()) if total_rest > 0 else 0.0
 
-    print("-" * 70)
-    print("  ISOLATIONFOREST (CONTAMINATION=10%) DETAILED BREAKDOWN")
-    print("-" * 70)
-    print(f"  Total Beneficiaries Analysed:  {len(scored_df_10)}")
-    print(f"  Synthetic Rationers Injected:  {total_rationers} ({injection_fraction*100:.1f}%)")
-    print(f"  Control / Rest Beneficiaries:  {total_rest}")
-    print("-" * 70)
-    print(f"  Synthetic Rationers Flagged:  {flagged_rationers} / {total_rationers} ({rate_rationers:.1f}%)")
-    print(f"  Control (Rest) Flagged:       {flagged_rest} / {total_rest} ({rate_rest:.1f}%)")
-    print(f"  Detection Lift:               {rate_rationers / max(0.1, rate_rest):.2f}x")
-    print("-" * 70)
-    print(f"  Mean Risk Score (Rationers):  {mean_risk_rationers:.2f} / 100")
-    print(f"  Mean Risk Score (Control):    {mean_risk_rest:.2f} / 100")
-    print("-" * 70 + "\n")
-
-    # 8. Generate bar chart visualization
+    # 9. Generate bar chart visualization
     chart_path = report_dir / "validation_chart.png"
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
