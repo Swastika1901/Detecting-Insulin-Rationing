@@ -7,6 +7,33 @@
 
 ---
 
+## 🚀 Quick Start
+
+Follow these steps to set up the environment, run the pipeline, and launch the dashboard:
+
+```bash
+# 1. Clone the repository and navigate into the project directory
+cd Detecting-Insulin-Rationing
+
+# 2. Create and activate a Python virtual environment
+python -m venv venv
+# On Windows PowerShell:
+.\venv\Scripts\Activate.ps1
+# On macOS / Linux:
+source venv/bin/activate
+
+# 3. Install required dependencies
+pip install -r requirements.txt
+
+# 4. Run the end-to-end processing pipeline
+python scripts/run_pipeline.py
+
+# 5. Launch the interactive Streamlit dashboard
+streamlit run app/dashboard.py
+```
+
+---
+
 ## 1. Problem Statement & Clinical Context
 
 Insulin is a life-critical hormone required by millions of individuals living with diabetes. Due to rising out-of-pocket costs, insurance coverage gaps, and financial strain, some patients engage in **insulin rationing**—intentionally delaying refills, skipping doses, or reducing dosage amounts to stretch their supply.
@@ -18,7 +45,7 @@ Insulin is a life-critical hormone required by millions of individuals living wi
 
 ---
 
-## 2. Dataset Overview & Caveats
+## 2. Dataset Overview & How to Access Real CMS Data
 
 ### Dataset Metadata
 * **Dataset Name**: CMS Data Entrepreneur Synthetic Public Use Files (DE-SynPUF)
@@ -28,18 +55,26 @@ Insulin is a life-critical hormone required by millions of individuals living wi
   * Prescription Drug Events File (`DE1_0_2008_to_2010_Prescription_Drug_Events_Sample_1.csv`)
 * **Reference Data**: OpenFDA National Drug Code (NDC) Directory (210 normalized insulin product NDCs)
 
+### How to Access Real CMS DE-SynPUF Claims Data
+1. Download the public CMS DE-SynPUF Sample 1 CSV files from official CMS / NBER mirrors or AWS S3 public mirrors:
+   * **CMS / NBER Mirror**: [CMS DE-SynPUF Download Page](https://www.cms.gov/Research-Statistics-Data-and-Systems/Downloadable-Public-Use-Files/SynPUFs)
+   * **AWS Public Data Mirror**: `s3://aws-publicdatasets/common-crawl/` or CMS public S3 buckets.
+2. Place the uncompressed CSV files into the local directory `data/raw/`:
+   * `data/raw/DE1_0_2008_Beneficiary_Summary_File_Sample_1.csv`
+   * `data/raw/DE1_0_2008_to_2010_Prescription_Drug_Events_Sample_1.csv`
+
 > [!NOTE]  
-> **Synthetic Data Caveat**: The CMS DE-SynPUF dataset is a synthetic, non-identifiable public use file created to protect beneficiary privacy. While it preserves structure and covariate relationships, it contains synthetic perturbations and sparse refill observations across sample slices.
+> **Gitignore & Fallback Behavior**: The directory `data/raw/` is included in `.gitignore` so large raw dataset files are never committed to the repository. If `data/raw/` is empty or raw files are missing, `scripts/run_pipeline.py` automatically falls back to generating a realistic synthetic cohort (`RUNNING ON SYNTHETIC DATA`), making the codebase 100% executable out-of-the-box without manual data downloads.
 
 ---
 
 ## 3. Pipeline Architecture
 
-The processing pipeline consists of five modular, fully tested components:
+The processing pipeline consists of **six** modular, fully tested components:
 
 ```mermaid
 flowchart LR
-    A["Raw CMS Data"] --> B["Data Loader (data_loader.py)"]
+    A["Raw CMS Data / Synthetic Fallback"] --> B["Data Loader (data_loader.py)"]
     C["FDA OpenFDA NDCs"] --> B
     B --> D["Feature Engineering (feature_engineering.py)"]
     D --> E["Model & Risk Scoring (model.py)"]
@@ -74,22 +109,36 @@ Supervised classifiers (e.g. XGBoost, Logistic Regression) require labelled posi
 
 ---
 
-## 5. Synthetic Validation & Empirical Results
+## 5. Results & Empirical Validation
 
-To prove that the pipeline detects the target rationing pattern, we conducted a controlled synthetic injection experiment (`scripts/run_validation.py`). Rationing behavior was injected into 15.0% of beneficiaries by progressively expanding their refill gaps over time ($m_i = 1.0 + 0.40 \times i$).
+To verify that feature engineering and anomaly scoring effectively capture rationing behaviors, we conducted a controlled synthetic injection experiment (`scripts/run_validation.py`). Rationing behavior was injected into 15.0% of beneficiaries by progressively expanding their refill gaps over time ($m_i = 1.0 + 0.40 \times i$).
 
-### Empirical Validation Findings
+> [!NOTE]  
+> **Sanity Check Caveat**: This synthetic injection experiment serves as a mathematical sanity check on synthetic data to confirm pipeline sensitivity to trend features. It is **not a clinical validation study** on real-world patient outcomes.
+
+### Empirical Validation Findings (10% Contamination Baseline)
 
 | Metric | Synthetic Rationers (Injected) | Control Group (Rest) | Empirical Performance |
 | :--- | :---: | :---: | :---: |
 | **Beneficiary Count** | 23 (15.0%) | 127 (85.0%) | Total $N = 150$ |
-| **Flagged Anomaly Rate (%)** | **60.9%** (14 / 23) | **0.8%** (1 / 127) | **77.30x Detection Lift** |
-| **Mean Risk Score (0–100)** | **70.73** | **17.12** | **+53.61 Point Margin** |
+| **Flagged Anomaly Rate (%)** | **56.5%** (13 / 23) | **1.6%** (2 / 127) | **35.89x Detection Lift** |
+| **Mean Risk Score (0–100)** | **73.90** | **17.77** | **+56.13 Point Margin** |
 
-![Synthetic Validation Chart](file:///c:/Users/swast/OneDrive/Desktop/Detecting-Insulin-Rationing/report/validation_chart.png)
+### Benchmark Metrics Comparison (`report/metrics.csv`)
+
+| Model | Contamination | ROC-AUC | Precision | Recall |
+| :--- | :---: | :---: | :---: | :---: |
+| **IsolationForest** | 5% | 0.9801 | 1.0000 | 0.3478 |
+| **IsolationForest** | 10% | 0.9801 | 0.8667 | 0.5652 |
+| **IsolationForest** | 20% | 0.9801 | 0.7667 | 1.0000 |
+| **Logistic Regression (5-fold CV)** | N/A | 1.0000 | 1.0000 | 1.0000 |
+| **Random Forest (5-fold CV)** | N/A | 1.0000 | 1.0000 | 1.0000 |
+| **Decision Tree (5-fold CV)** | N/A | 1.0000 | 1.0000 | 1.0000 |
+
+![Synthetic Validation Chart](report/validation_chart.png)
 
 > [!IMPORTANT]  
-> **Key Validation Finding**: The pipeline demonstrated a **77.30x detection lift** (60.9% vs 0.8% flagged rate) for beneficiaries exhibiting progressive refill delays, confirming that the unsupervised model effectively targets the engineered rationing signatures.
+> **Key Validation Finding**: Unsupervised IsolationForest achieves a **0.9801 ROC-AUC** across contamination thresholds. Supervised baselines achieve perfect cross-validated classification on the injected synthetic labels.
 
 ---
 
@@ -100,3 +149,9 @@ To prove that the pipeline detects the target rationing pattern, we conducted a 
 > 1. **No Ground-Truth Guarantees**: Refill delays can occasionally stem from medication changes, physician samples, hospitalizations, or mail-order overlaps rather than financial rationing.
 > 2. **Synthetic Data Constraints**: Results generated on CMS DE-SynPUF data serve demonstration purposes and require re-tuning when applied to commercial or Medicare Advantage claims databases.
 > 3. **Not a Clinical Diagnostic Tool**: This pipeline is an administrative risk-triage tool. Flagged beneficiaries **must be routed to clinical care managers or pharmacists for human outreach**, never used to deny coverage or automate adverse benefit determinations.
+
+---
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

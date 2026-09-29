@@ -1,0 +1,7 @@
+model,contamination,roc_auc,precision,recall
+IsolationForest (cont=5%),0.05,0.9801,1.0,0.3478
+IsolationForest (cont=10%),0.10,0.9801,0.8667,0.5652
+IsolationForest (cont=20%),0.20,0.9801,0.7667,1.0
+Logistic Regression (5-fold CV),N/A,1.0,1.0,1.0
+Random Forest (5-fold CV),N/A,1.0,1.0,1.0
+Decision Tree (5-fold CV),N/A,1.0,1.0,1.0

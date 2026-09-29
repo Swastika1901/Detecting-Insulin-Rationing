@@ -7,7 +7,8 @@ Features:
 1. Interactive overview of processed beneficiaries & risk score distribution.
 2. Sortable table of flagged high-risk patients.
 3. Patient deep-dive explorer with metric color indicators (Green <40, Amber 40-70, Red >70).
-4. Per-fill longitudinal line chart of `gap_vs_supply_ratio` over fill sequence.
+4. Per-fill longitudinal line chart of `gap_vs_supply_ratio` over fill sequence
+   loaded from data/processed/cohort_events.csv.
 5. Sidebar disclaimer explaining synthetic DE-SynPUF demonstration purpose.
 """
 
@@ -24,10 +25,6 @@ import streamlit as st
 # Add project root to sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
-
-from src.data_loader import load_cohort  # noqa: E402
-from src.feature_engineering import build_patient_features  # noqa: E402
-from src.validation import inject_synthetic_rationing  # noqa: E402
 
 # Page config
 st.set_page_config(
@@ -97,47 +94,32 @@ def load_risk_scores() -> pd.DataFrame:
     """Load scored patient risk predictions CSV."""
     path = PROJECT_ROOT / "data" / "processed" / "patient_risk_scores.csv"
     if not path.exists():
-        st.error(f"Processed risk scores file not found at `{path}`. Please run `python scripts/run_pipeline.py` first.")
+        st.error(
+            f"Processed risk scores file not found at `{path}`. Please run `python scripts/run_pipeline.py` first."
+        )
         st.stop()
     df = pd.read_csv(path)
     return df
 
 
 @st.cache_data
-def load_raw_cohort_events() -> pd.DataFrame:
-    """Load raw fill events for per-fill gap calculation."""
-    try:
-        df = load_cohort(
-            data_dir=PROJECT_ROOT / "data" / "raw",
-            ndc_path=PROJECT_ROOT / "data" / "reference" / "insulin_ndc_list.csv",
+def load_cohort_events() -> pd.DataFrame:
+    """Load raw cohort events CSV saved by run_pipeline.py."""
+    path = PROJECT_ROOT / "data" / "processed" / "cohort_events.csv"
+    if not path.exists():
+        st.error(
+            f"Processed cohort events file not found at `{path}`. Please run `python scripts/run_pipeline.py` first."
         )
-        if df["DESYNPUF_ID"].nunique() < 10:
-            # Inject synthetic cohort if raw sample slice is sparse
-            from scripts.run_validation import generate_synthetic_cohort
-            synth_df = generate_synthetic_cohort(n_patients=150)
-            synth_df_injected, _ = inject_synthetic_rationing(synth_df, fraction=0.15, random_state=42)
-            return synth_df_injected
-        return df
-    except Exception:
-        from scripts.run_validation import generate_synthetic_cohort
-        synth_df = generate_synthetic_cohort(n_patients=150)
-        synth_df_injected, _ = inject_synthetic_rationing(synth_df, fraction=0.15, random_state=42)
-        return synth_df_injected
+        st.stop()
+    df = pd.read_csv(path)
+    return df
 
 
 def get_patient_fill_history(df_events: pd.DataFrame, patient_id: str) -> pd.DataFrame:
-    """Extract and compute per-fill actual gap days and gap_vs_supply_ratio."""
+    """Extract and compute per-fill actual gap days and gap_vs_supply_ratio for a patient."""
     p_df = df_events[df_events["DESYNPUF_ID"] == patient_id].copy()
     if p_df.empty:
-        # Fallback synthetic generation for single patient display
-        dates = pd.date_range("2020-01-01", periods=6, freq="35D")
-        return pd.DataFrame({
-            "fill_seq": range(1, 6),
-            "SRVC_DT": dates[:-1],
-            "DAYS_SUPLY_NUM": [30] * 5,
-            "actual_gap_days": [35, 42, 50, 60, np.nan],
-            "gap_vs_supply_ratio": [1.17, 1.40, 1.67, 2.00, np.nan],
-        })
+        return pd.DataFrame()
 
     p_df["SRVC_DT"] = pd.to_datetime(p_df["SRVC_DT"])
     p_df = p_df.sort_values("SRVC_DT").reset_index(drop=True)
@@ -171,7 +153,7 @@ def main():
 
     # Load Data
     risk_df = load_risk_scores()
-    events_df = load_raw_cohort_events()
+    events_df = load_cohort_events()
 
     # Overview KPI Cards
     col1, col2, col3, col4 = st.columns(4)
@@ -261,26 +243,29 @@ def main():
             st.markdown("#### Longitudinal Refill Gap vs Supply Ratio")
             p_history = get_patient_fill_history(events_df, selected_pid)
 
-            valid_history = p_history.dropna(subset=["gap_vs_supply_ratio"]).copy()
-            if valid_history.empty:
-                st.warning("Insufficient gap observations available for this beneficiary.")
+            if p_history.empty:
+                st.info("No fill history available")
             else:
-                fig, ax = plt.subplots(figsize=(8, 4))
-                ax.plot(
-                    valid_history["fill_seq"],
-                    valid_history["gap_vs_supply_ratio"],
-                    marker="o",
-                    linewidth=2.5,
-                    color="#E63946" if is_flagged else "#1D3557",
-                    label="Gap vs Supply Ratio",
-                )
-                ax.axhline(1.0, color="#64748B", linestyle="--", label="Expected Supply Ratio (1.0)")
-                ax.set_xlabel("Fill Sequence Index", fontsize=10, fontweight="bold")
-                ax.set_ylabel("Actual Gap / Days Supply Ratio", fontsize=10, fontweight="bold")
-                ax.set_title(f"Refill Delay Trend for {selected_pid}", fontsize=11, fontweight="bold")
-                ax.grid(True, linestyle=":", alpha=0.6)
-                ax.legend(loc="upper left")
-                st.pyplot(fig)
+                valid_history = p_history.dropna(subset=["gap_vs_supply_ratio"]).copy()
+                if valid_history.empty:
+                    st.info("No fill history available")
+                else:
+                    fig, ax = plt.subplots(figsize=(8, 4))
+                    ax.plot(
+                        valid_history["fill_seq"],
+                        valid_history["gap_vs_supply_ratio"],
+                        marker="o",
+                        linewidth=2.5,
+                        color="#E63946" if is_flagged else "#1D3557",
+                        label="Gap vs Supply Ratio",
+                    )
+                    ax.axhline(1.0, color="#64748B", linestyle="--", label="Expected Supply Ratio (1.0)")
+                    ax.set_xlabel("Fill Sequence Index", fontsize=10, fontweight="bold")
+                    ax.set_ylabel("Actual Gap / Days Supply Ratio", fontsize=10, fontweight="bold")
+                    ax.set_title(f"Refill Delay Trend for {selected_pid}", fontsize=11, fontweight="bold")
+                    ax.grid(True, linestyle=":", alpha=0.6)
+                    ax.legend(loc="upper left")
+                    st.pyplot(fig)
 
 
 if __name__ == "__main__":

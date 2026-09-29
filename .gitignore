@@ -44,3 +44,7 @@ data/raw/*.csv
 *.swp
 .DS_Store
 Thumbs.db
+
+# Validation model outputs
+models/validation/
+
